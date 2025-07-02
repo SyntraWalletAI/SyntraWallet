@@ -1,0 +1,9 @@
+{
+  "windowSize": 10,
+  "threshold": 0.15,
+  "momentumFactor": 0.8,
+  "varianceWeight": 0.2,
+  "minConfidence": 0.1,
+  "maxConfidence": 1.0,
+  "backtestPeriod": 30
+}

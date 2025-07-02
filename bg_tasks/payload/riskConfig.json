@@ -1,0 +1,19 @@
+{
+  "weights": {
+    "volume": 0.4,
+    "liquidity": 0.45,
+    "volatility": 0.15
+  },
+  "scale": 150,
+  "clamp": [0, 200],
+  "smoothingFactor": 0.7,
+  "dynamicThresholds": {
+    "low": 50,
+    "medium": 100,
+    "high": 150
+  },
+  "volatilityAdjustment": {
+    "enabled": true,
+    "multiplier": 1.2
+  }
+}
