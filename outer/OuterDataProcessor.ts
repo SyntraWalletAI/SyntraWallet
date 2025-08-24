@@ -1,11 +1,6 @@
-/**
- * Process and transform OuterEvent objects into a structured format.
- */
+
 import type { OuterEvent } from "./OuterEventWatcher"
 
-/**
- * Output of processing an OuterEvent
- */
 export interface ProcessedOuterData {
   /** Unique identifier of the event */
   eventId: string
@@ -17,9 +12,7 @@ export interface ProcessedOuterData {
   durationMs?: number
 }
 
-/**
- * Options for batch processing and instrumentation
- */
+
 export interface OuterDataProcessorOptions {
   /** If true, skip invalid events instead of throwing (default: false) */
   skipInvalid?: boolean
@@ -43,9 +36,7 @@ const logger = {
     console.error({ level: "error", timestamp: new Date().toISOString(), msg, ...meta }),
 }
 
-/**
- * Transforms OuterEvent instances into enriched summaries.
- */
+
 export class OuterDataProcessor {
   private skipInvalid: boolean
   private maxKeysInSummary?: number
@@ -103,9 +94,6 @@ export class OuterDataProcessor {
     }
   }
 
-  /**
-   * Process an array of OuterEvent, with optional skipping of invalid entries.
-   */
   public batchProcess(events: OuterEvent[]): ProcessedOuterData[] {
     const results: ProcessedOuterData[] = []
     for (const evt of events) {
@@ -119,9 +107,7 @@ export class OuterDataProcessor {
     return results
   }
 
-  /**
-   * Validate core properties of an OuterEvent
-   */
+
   private validateEvent(event: OuterEvent): void {
     if (!event || typeof event !== "object")
       throw new TypeError("Event must be a non-null object")
