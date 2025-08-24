@@ -1,8 +1,6 @@
 import type { TransferRecord } from "./AssetFlowMonitor"
 
-/**
- * Aggregate of total incoming and outgoing flow for a token.
- */
+
 export interface FlowSummary {
   /** Token symbol or mint */
   token: string
@@ -14,9 +12,6 @@ export interface FlowSummary {
   netFlow: number
 }
 
-/**
- * Options to customize flow analysis.
- */
 export interface FlowAnalyzerOptions {
   /** Address to treat as “self” for in/out classification (default: first record’s `to`) */
   selfAddress?: string
@@ -24,9 +19,7 @@ export interface FlowAnalyzerOptions {
   includeZeroNet?: boolean
 }
 
-/**
- * Analyzes a series of transfer records to produce token-level flow summaries.
- */
+
 export class AssetFlowAnalyzer {
   private readonly records: readonly TransferRecord[]
   private readonly selfAddress: string
@@ -51,10 +44,6 @@ export class AssetFlowAnalyzer {
     }
   }
 
-  /**
-   * Summarize total in/out flow by token.
-   * @param options.includeZeroNet  Include tokens whose net flow is zero
-   */
   public summarize(
     options: FlowAnalyzerOptions = {}
   ): FlowSummary[] {
