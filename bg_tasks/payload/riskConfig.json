@@ -1,252 +1,111 @@
-// scoringEngine.ts
-// Build a robust, type-safe scoring engine around your JSON config:
-// - Strong Zod validation (shape + invariants)
-// - Weight normalization (sum → 1)
-// - Volatility adjustment (optional multiplier)
-// - Scaling, clamping, and optional EMA-style smoothing
-// - Dynamic thresholds → category labels
-// - Clear breakdown for observability
-
-import { z } from "zod"
-
-/* ========= Types ========= */
-
-export type Weights = {
-  volume: number
-  liquidity: number
-  volatility: number
-}
-
-export type DynamicThresholds = {
-  low: number
-  medium: number
-  high: number
-}
-
-export type VolatilityAdjustment = {
-  enabled: boolean
-  multiplier: number
-}
-
-export type ScoringConfig = {
-  weights: Weights
-  scale: number
-  clamp: [number, number]
-  smoothingFactor: number // EMA alpha on previous score (0..1, where 1 → fully sticky)
-  dynamicThresholds: DynamicThresholds
-  volatilityAdjustment: VolatilityAdjustment
-}
-
-export type ScoreInputs = {
-  /** Suggested range: 0..1 (engine will clamp) */
-  volume: number
-  /** Suggested range: 0..1 (engine will clamp) */
-  liquidity: number
-  /** Suggested range: 0..1 (engine will clamp) */
-  volatility: number
-}
-
-export type ScoreOutput = {
-  /** Weighted sum before scale/clamp (0..(1*multiplier) approx) */
-  weighted: number
-  /** After scale + clamp */
-  score: number
-  /** If prevScore provided, smoothed score; otherwise equals score */
-  smoothed: number
-  /** Category from dynamic thresholds (based on smoothed) */
-  category: "low" | "medium" | "high" | "extreme"
-  /** Extra telemetry to help debug */
-  breakdown: {
-    inputs: Required<ScoreInputs>
-    weights: Required<Weights>
-    weightsNormalized: Required<Weights>
-    volatilityAdjusted: number
-    scale: number
-    clamp: [number, number]
-    thresholds: DynamicThresholds
-    smoothingFactor: number
-  }
-}
-
-/* ========= Validation ========= */
-
-const WeightsSchema = z
-  .object({
-    volume: z.number().finite().nonnegative(),
-    liquidity: z.number().finite().nonnegative(),
-    volatility: z.number().finite().nonnegative(),
-  })
-  .refine(
-    (w) => w.volume + w.liquidity + w.volatility > 0,
-    "At least one weight must be > 0"
-  )
-
-const ScoringConfigSchema: z.ZodType<ScoringConfig> = z
-  .object({
-    weights: WeightsSchema,
-    scale: z.number().finite().positive(),
-    clamp: z
-      .tuple([z.number().finite(), z.number().finite()])
-      .refine(([min, max]) => max > min, "clamp must be [min,max] with max > min"),
-    smoothingFactor: z.number().finite().min(0).max(1),
-    dynamicThresholds: z
-      .object({
-        low: z.number().finite(),
-        medium: z.number().finite(),
-        high: z.number().finite(),
-      })
-      .refine(
-        ({ low, medium, high }) => low < medium && medium < high,
-        "dynamicThresholds must be strictly increasing: low < medium < high"
-      ),
-    volatilityAdjustment: z.object({
-      enabled: z.boolean(),
-      multiplier: z.number().finite().positive(),
-    }),
-  })
-
-/* ========= Defaults (from your JSON) ========= */
-
-export const defaultConfig: ScoringConfig = ScoringConfigSchema.parse({
-  weights: {
-    volume: 0.4,
-    liquidity: 0.45,
-    volatility: 0.15,
-  },
-  scale: 150,
-  clamp: [0, 200],
-  smoothingFactor: 0.7,
-  dynamicThresholds: {
-    low: 50,
-    medium: 100,
-    high: 150,
-  },
-  volatilityAdjustment: {
-    enabled: true,
-    multiplier: 1.2,
-  },
-})
-
-/* ========= Helpers ========= */
-
-function normalizeWeights(w: Weights): Weights {
-  const s = w.volume + w.liquidity + w.volatility
-  if (s <= 0) throw new Error("Weights sum must be > 0")
-  return {
-    volume: w.volume / s,
-    liquidity: w.liquidity / s,
-    volatility: w.volatility / s,
-  }
-}
-
-function clamp01(x: number): number {
-  return Math.max(0, Math.min(1, x))
-}
-
-function clampTo([min, max]: [number, number], x: number): number {
-  return Math.max(min, Math.min(max, x))
-}
-
-function categorize(th: DynamicThresholds, value: number): ScoreOutput["category"] {
-  if (value < th.low) return "low"
-  if (value < th.medium) return "medium"
-  if (value < th.high) return "high"
-  return "extreme"
-}
-
-/* ========= Engine ========= */
-
-export class ScoringEngine {
-  readonly config: ScoringConfig
-  readonly weightsNormalized: Weights
-
-  constructor(cfg: ScoringConfig = defaultConfig) {
-    // validate & freeze
-    this.config = Object.freeze(ScoringConfigSchema.parse(cfg))
-    this.weightsNormalized = normalizeWeights(this.config.weights)
-  }
-
-  /**
-   * Compute a score from inputs (0..1 recommended for each dimension).
-   * - Applies volatility adjustment if enabled
-   * - Scales and clamps
-   * - Optionally smooths with previous score (EMA with factor `smoothingFactor`)
-   */
-  score(inputs: ScoreInputs, prevScore?: number): ScoreOutput {
-    const safeInputs = {
-      volume: clamp01(inputs.volume),
-      liquidity: clamp01(inputs.liquidity),
-      volatility: clamp01(inputs.volatility),
-    }
-
-    // Adjust volatility dimension if enabled (amplify its contribution)
-    const volAdjusted = this.config.volatilityAdjustment.enabled
-      ? clamp01(safeInputs.volatility * this.config.volatilityAdjustment.multiplier)
-      : safeInputs.volatility
-
-    // Weighted sum (pre-scale)
-    const weighted =
-      safeInputs.volume * this.weightsNormalized.volume +
-      safeInputs.liquidity * this.weightsNormalized.liquidity +
-      volAdjusted * this.weightsNormalized.volatility
-
-    // Scale & clamp
-    const rawScore = weighted * this.config.scale
-    const score = clampTo(this.config.clamp, rawScore)
-
-    // EMA smoothing on top of *final* score
-    const alpha = this.config.smoothingFactor // weight on previous value
-    const smoothed =
-      typeof prevScore === "number"
-        ? alpha * prevScore + (1 - alpha) * score
-        : score
-
-    const category = categorize(this.config.dynamicThresholds, smoothed)
-
-    return {
-      weighted,
-      score,
-      smoothed,
-      category,
-      breakdown: {
-        inputs: safeInputs,
-        weights: this.config.weights,
-        weightsNormalized: this.weightsNormalized,
-        volatilityAdjusted: volAdjusted,
-        scale: this.config.scale,
-        clamp: this.config.clamp,
-        thresholds: this.config.dynamicThresholds,
-        smoothingFactor: this.config.smoothingFactor,
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "scoringConfigSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["weights", "scale", "clamp", "smoothingFactor", "dynamicThresholds", "volatilityAdjustment"],
+    "properties": {
+      "weights": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["volume", "liquidity", "volatility"],
+        "properties": {
+          "volume": { "type": "number", "minimum": 0 },
+          "liquidity": { "type": "number", "minimum": 0 },
+          "volatility": { "type": "number", "minimum": 0 }
+        },
+        "description": "Raw weights (will be normalized so their sum = 1)"
       },
+      "scale": { "type": "number", "exclusiveMinimum": 0 },
+      "clamp": {
+        "type": "array",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": [{ "type": "number" }, { "type": "number" }],
+        "description": "[min, max] range for final score"
+      },
+      "smoothingFactor": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "EMA alpha applied to previous score"
+      },
+      "dynamicThresholds": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["low", "medium", "high"],
+        "properties": {
+          "low": { "type": "number" },
+          "medium": { "type": "number" },
+          "high": { "type": "number" }
+        },
+        "description": "Must satisfy low < medium < high"
+      },
+      "volatilityAdjustment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "multiplier"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "multiplier": { "type": "number", "exclusiveMinimum": 0 }
+        }
+      }
+    }
+  },
+  "defaultConfig": {
+    "weights": {
+      "volume": 0.4,
+      "liquidity": 0.45,
+      "volatility": 0.15
+    },
+    "scale": 150,
+    "clamp": [0, 200],
+    "smoothingFactor": 0.7,
+    "dynamicThresholds": {
+      "low": 50,
+      "medium": 100,
+      "high": 150
+    },
+    "volatilityAdjustment": {
+      "enabled": true,
+      "multiplier": 1.2
+    }
+  },
+  "exampleInputs": {
+    "volume": 0.6,
+    "liquidity": 0.7,
+    "volatility": 0.3
+  },
+  "computedExample": {
+    "weighted": 0.609,
+    "score": 91.35,
+    "smoothed": 91.35,
+    "category": "medium",
+    "breakdown": {
+      "inputs": {
+        "volume": 0.6,
+        "liquidity": 0.7,
+        "volatility": 0.3
+      },
+      "weights": {
+        "volume": 0.4,
+        "liquidity": 0.45,
+        "volatility": 0.15
+      },
+      "weightsNormalized": {
+        "volume": 0.4,
+        "liquidity": 0.45,
+        "volatility": 0.15
+      },
+      "volatilityAdjusted": 0.36,
+      "scale": 150,
+      "clamp": [0, 200],
+      "thresholds": {
+        "low": 50,
+        "medium": 100,
+        "high": 150
+      },
+      "smoothingFactor": 0.7
     }
   }
 }
-
-/* ========= Utility: merge user overrides with defaults ========= */
-
-export function resolveConfig(partial: Partial<ScoringConfig>): ScoringConfig {
-  // deep merge with defaults
-  const merged: ScoringConfig = {
-    ...defaultConfig,
-    ...partial,
-    weights: { ...defaultConfig.weights, ...(partial.weights ?? {}) },
-    dynamicThresholds: {
-      ...defaultConfig.dynamicThresholds,
-      ...(partial.dynamicThresholds ?? {}),
-    },
-    volatilityAdjustment: {
-      ...defaultConfig.volatilityAdjustment,
-      ...(partial.volatilityAdjustment ?? {}),
-    },
-  }
-  return ScoringConfigSchema.parse(merged)
-}
-
-/* ========= Example =========
-import { ScoringEngine, defaultConfig } from "./scoringEngine"
-
-const engine = new ScoringEngine(defaultConfig)
-const first = engine.score({ volume: 0.6, liquidity: 0.7, volatility: 0.3 })
-const next  = engine.score({ volume: 0.55, liquidity: 0.72, volatility: 0.28 }, first.smoothed)
-console.log(first, next)
-*/ 
